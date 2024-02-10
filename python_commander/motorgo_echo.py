@@ -9,6 +9,15 @@ server_port = 4210
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.connect((server_ip, server_port))
 
+def reset():
+    send_motor_command(50); ##centered on 0-100 so 50 is no power
+    ## TODO start training on data
+    vel_is_zero = False
+    while not vel_is_zero:
+        send_motor_command(50)
+        position, velocity = receive_reply()
+        vel_is_zero = (velocity == 0)
+
 def send_motor_command(power_level):
     message = str(power_level)+"\n"
     sock.sendall(message.encode())
