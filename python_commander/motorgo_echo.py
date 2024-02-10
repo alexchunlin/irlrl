@@ -10,7 +10,7 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.connect((server_ip, server_port))
 
 def send_motor_command(power_level):
-    message = f"{power_level}\n"
+    message = str(power_level)+"\n"
     sock.sendall(message.encode())
 
 def receive_reply():
@@ -25,11 +25,11 @@ try:
         power_level = 50 + 50 * math.sin(2 * math.pi * 0.1 * t)
         send_motor_command(power_level)
         pos_vel_array = receive_reply()
-        print(f"Received: {pos_vel_array}")
-
+        # print(f"Received: {pos_vel_array}")
+        print("Received: ", pos_vel_array)
         # If you want to use position and velocity individually
         position, velocity = pos_vel_array
-        print(f"Position: {position}, Velocity: {velocity}")
+        print("Position: ",position, "Velocity: ", velocity)
 
         time.sleep(0.01)  # Adjust as necessary
 finally:
