@@ -1,106 +1,104 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WifiUDP.h>
 #include <WiFiServer.h>
+#include <WiFiManager.h>
+#include <Servo.h>
 
-#include "motorgo_mini.h"
+// This is the chassis(main) robot code, running on an esp32 MotorGo board
+// It has the following goals:
+//   - recieves UDP encoder data from the base_rig node (running on esp32)
+//   - revieves TCP servo commands from the python wifi comms bridge (running on computer)
+//   - sends TCP encoder data to the python wifi comms bridge
+//   - interprets servo commands and writes according gait to servos
 
-MotorGo::MotorGoMini motorgo_mini;
-MotorGo::MotorChannel& motor_right = motorgo_mini.ch1;
-MotorGo::MotorParameters motor_params_right;
-MotorGo::PIDParameters velocity_pid_params_right;
+const int servoPins[] = {47, 38, 39, 40};
+const int numServos = sizeof(servoPins) / sizeof(int);
+Servo servos[numServos];
+// map servo 1, 2, 3, 4 to left_hip, left_knee, right_hip, right_knee for readability
+const int left_hip = 0;
+const int left_knee = 1;
+const int right_hip = 2;
+const int right_knee = 3;
 
-// wifiStuff
-const char* ssid = "NotARobot";
-const char* password = "M1crowave!";
-const char* testReplyPacket = "MotorGoHello";
 
-// WiFiUDP udp;
-// unsigned int localUdpPort = 4210;
-unsigned int port = 4210;
-WiFiServer server(4210);
-WiFiClient client;
+WiFiServer server(8080); // Set the desired port number
 
-char incomingPacket[255];
-char replyPacket[] = "acknowledged";
+// struct for servo command data combined into one uint32_t for easy transfer
+union ServoCommand {
+    struct {
+        uint8_t left_hip_deg;
+        uint8_t left_knee_deg;
+        uint8_t right_hip_deg;
+        uint8_t right_knee_deg;
+    };
+    uint8_t servo_pos_commands[numServos];
+};
+// struct for data to transfer to the python wifi comms bridge
+struct ResponseData {
+    union{
+        struct {
+            float boom_vel_rad_s;
+            float boom_pos_rad;
+        };
+        uint32_t raw;
+    };
+};
 
-void setup()
-{
-  delay(2000);
-  Serial.begin(115200);
-  delay(3000);
+WiFiManager wm;
+ServoCommand last_servo_command;
+ResponseData response_to_rl_agent;
 
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(100);
-    Serial.print(".");
-  }
-  server.begin();
-  Serial.println("wifi connected (udp)");
-  Serial.print("IP addy: ");
-  Serial.println(WiFi.localIP());
-  Serial.printf("UDP server on port %d\n", port);
-
-  motor_params_right.pole_pairs = 11;
-  motor_params_right.power_supply_voltage = 5.0;
-  motor_params_right.voltage_limit = 5.0;
-  motor_params_right.current_limit = 300;
-  motor_params_right.velocity_limit = 100.0;
-  motor_params_right.calibration_voltage = 2.0;
-  motor_params_right.reversed = true;
-
-  // Setup Ch0
-  bool calibrate = false;
-  motor_right.init(motor_params_right, calibrate);
-
-  // Set velocity controller parameters
-  // Setup PID parameters
-
-  velocity_pid_params_right.p = 1.6;
-  velocity_pid_params_right.i = 0.01;
-  velocity_pid_params_right.d = 0.0;
-  velocity_pid_params_right.output_ramp = 10000.0;
-  velocity_pid_params_right.lpf_time_constant = 0.11;
-
-  motor_right.set_velocity_controller(velocity_pid_params_right);
-
-  //   Set closed-loop velocity mode
-  motor_right.set_control_mode(MotorGo::ControlMode::Voltage);
-
-  //   Enable motors
-  motor_right.enable();
+// servo writer function
+void writeServoCommand(ServoCommand command) {
+    servos[left_hip].write(command.left_hip_deg);
+    servos[left_knee].write(command.left_knee_deg);
+    servos[right_hip].write(command.right_hip_deg);
+    servos[right_knee].write(command.right_knee_deg);
 }
 
-void loop(){
-  // Check if a client has connected
-  if (!client.connected()) {
-    client = server.available();
-  }
-  
-  if (client) {
-    if (client.available()) {
-        String message = client.readStringUntil('\n');
-    // Serial.printf("Received packet: %s\n", incomingPacket);
+void setup() {
+    Serial.begin(115200);
 
-    // TODO: Parse the incomingPacket to extract motor power levels and act accordingly
-    // cast packet content to double
-    float command = (atof(message.c_str()) - 50.0f)/40.0f;
-    if (command < (-2.50)) command = -2.50;
-    if (command > (2.5)) command = 2.50;
+    // Automatically connect to WiFi using WiFiManager
+    bool res = wm.autoConnect("AutoConnectAP", "password"); // Replace with your desired AP name and password
+    if (!res) {
+        Serial.println("Failed to connect to WiFi");
+        ESP.restart();
+    } else {
+        Serial.println("Connected to WiFi");
+    }
 
-    // Sending a reply (for example, position and velocity data)
-    float position = motor_right.get_position();  // Placeholder for actual position data
-    float velocity = motor_right.get_velocity();  // Placeholder for actual velocity data
-    String reply = String(position) + "," + String(velocity); // Creating a reply string with position and velocity
+    server.begin();
+    Serial.println("Server started");
 
-    client.print(reply);
-    // udp.beginPacket(udp.remoteIP(), udp.remotePort());
-    // udp.write((const uint8_t*)reply.c_str(), reply.length()); // Corrected: Now actually sending the reply
-    // udp.endPacket();
-
-    motor_right.set_target_voltage(command);
-  }
-
-  motor_right.loop();
+    // Initialize servos
+    for (int i = 0; i < numServos; i++) {
+        servos[i].attach(servoPins[i]);
+        int pos = 10; // near ~ 0 ish start position
+        servos[i].write(pos);
+    }
 }
+// 
+void loop() {
+    WiFiClient client = server.available();
+    if (client) {
+        if (client.available() >= sizeof(ServoCommand)) {
+            // Read the servo command
+            client.read((uint8_t*)&last_servo_command, sizeof(ServoCommand));
+
+            // Write the servo command to the servos using our function
+            writeServoCommand(last_servo_command);
+
+            
+            client.write((uint8_t*)&response_to_rl_agent, sizeof(float));
+        }
+        client.stop();
+    } else {
+        delay(1000);
+        Serial.println("No client connected");
+         for (int i = 0; i < numServos && i < MAX_SERVOS; i++) {
+        int pos = random(10, 170);
+        servos[i].write(pos);
+    }
+    }
 }
